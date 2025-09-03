@@ -8,25 +8,30 @@ try:
 except Exception:
     genai = None
 
-# Load .env locally (use Secrets on cloud)
+# Load .env locally; on Streamlit Cloud use Secrets
 load_dotenv()
 
-# -----------------------------
-# Streamlit page setup
-# -----------------------------
+# ---------- Config ----------
 st.set_page_config(page_title="Uni Life Chatbot", page_icon="🎓", layout="centered")
 st.title("🎓 Uni Life Chatbot")
-st.caption("UI + Rule/AI + ≥5 custom answers + history + deployable (Streamlit).")
+st.caption("FAQ-first. Uses Gemini automatically when available. Session history included.")
 
 # Conversation memory
 if "history" not in st.session_state:
-    st.session_state.history = []  # list[dict]: {"role": "user"/"assistant", "content": "..."}
+    st.session_state.history = []  # [{"role": "user"/"assistant", "content": "..."}]
 
-# -----------------------------
-# Load FAQs (custom knowledge)
-# Format per line: "question||answer"
-# Match rule: longest keyword first
-# -----------------------------
+# Read API key (never shown in UI)
+GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
+USE_GEMINI = bool(GOOGLE_API_KEY) and genai is not None  # auto-enable if key + SDK
+
+# System prompt (kept internal)
+SYSTEM_PROMPT = (
+    "You are a concise, helpful university life assistant. "
+    "Use short paragraphs or bullet points. If info may vary by campus, say it. "
+    "End with a one-line TL;DR."
+)
+
+# ---------- Custom Knowledge (FAQs) ----------
 FAQ_PATH = "faqs.txt"
 faq_pairs = []
 if os.path.exists(FAQ_PATH):
@@ -49,40 +54,19 @@ def faq_lookup(user_text: str):
             best_len = len(q)
     return best
 
-# -----------------------------
-# Sidebar options (Gemini optional)
-# -----------------------------
-with st.sidebar:
-    st.header("⚙️ Options")
-    use_gemini = st.toggle("Use Gemini if no FAQ match", value=False)
-    # Prefer environment var (.env or cloud Secrets); allow manual override
-    default_key = os.getenv("GOOGLE_API_KEY", "")
-    google_api_key = st.text_input("GOOGLE_API_KEY", type="password", value=default_key)
-    system_prompt = st.text_area(
-        "System Prompt (for Gemini)",
-        value=(
-            "You are a concise, helpful university life assistant. "
-            "Use short paragraphs or bullet points. If info may vary by campus, say it. "
-            "End with a one-line TL;DR."
-        ),
-        height=120
-    )
-
-def gemini_answer(messages: list[dict], api_key: str, sys_prompt: str) -> str:
-    """
-    Call Gemini 1.5 Flash with multi-turn context.
-    messages: [{"role": "user"/"assistant", "content": "..."}]
-    """
-    if not genai:
-        return "Gemini SDK not installed (rule mode still works)."
-    if not api_key:
-        return "No GOOGLE_API_KEY provided (enter in sidebar) or turn off Gemini to use rule mode."
+# ---------- Gemini ----------
+def gemini_answer(messages: list[dict]) -> str:
+    """Call Gemini 1.5 Flash with chat history."""
+    if not USE_GEMINI:
+        return (
+            "I couldn't find a direct answer in my campus FAQs."
+        )  # Silent fallback message (no key exposure)
     try:
-        genai.configure(api_key=api_key)
+        genai.configure(api_key=GOOGLE_API_KEY)
         model = genai.GenerativeModel("gemini-1.5-flash")
 
-        # Build context: first message as system prompt, then the history
-        full_ctx = [{"role": "user", "parts": [f"[SYSTEM]{sys_prompt}"]}]
+        # First message acts as system instruction; then history
+        full_ctx = [{"role": "user", "parts": [f"[SYSTEM]{SYSTEM_PROMPT}"]}]
         for m in messages:
             role = "user" if m["role"] == "user" else "model"
             full_ctx.append({"role": role, "parts": [m["content"]]})
@@ -90,11 +74,10 @@ def gemini_answer(messages: list[dict], api_key: str, sys_prompt: str) -> str:
         resp = model.generate_content(full_ctx)
         return (resp.text or "").strip() if hasattr(resp, "text") else "(empty response)"
     except Exception as e:
-        return f"Gemini error: {e}"
+        # Do not leak key; return a generic message
+        return "I couldn't find a direct answer in my campus FAQs."
 
-# -----------------------------
-# UI: input + Ask button + Clear
-# -----------------------------
+# ---------- UI ----------
 st.subheader("Ask about university life")
 col1, col2 = st.columns([4, 1], vertical_alignment="bottom")
 with col1:
@@ -102,34 +85,25 @@ with col1:
 with col2:
     ask = st.button("Ask", type="primary", use_container_width=True)
 
-clear = st.button("Clear conversation")
-if clear:
+if st.button("Clear conversation"):
     st.session_state.history = []
     st.rerun()
 
-# Submit handling
+# Handle submit
 if ask and user_input.strip():
     st.session_state.history.append({"role": "user", "content": user_input.strip()})
 
-    # 1) Try FAQ first (custom knowledge)
+    # 1) Try FAQ first
     faq_ans = faq_lookup(user_input)
     if faq_ans:
         answer = f"**From FAQ:**\n{faq_ans}\n\n**TL;DR:** Answered from custom knowledge."
     else:
-        # 2) If no FAQ match → optional Gemini; otherwise guidance
-        if use_gemini:
-            answer = gemini_answer(st.session_state.history, google_api_key, system_prompt)
-        else:
-            answer = (
-                "I couldn't find a direct answer in my campus FAQs.\n"
-                "Try rephrasing, or enable **Use Gemini** in the sidebar for AI assistance."
-            )
+        # 2) Auto-use Gemini if available; else silent FAQ fallback text
+        answer = gemini_answer(st.session_state.history)
 
     st.session_state.history.append({"role": "assistant", "content": answer})
 
-# -----------------------------
-# Conversation display (stretch)
-# -----------------------------
+# Conversation display
 st.divider()
 st.subheader("Conversation")
 if not st.session_state.history:
@@ -143,4 +117,4 @@ else:
 
 # Footer
 st.markdown("<br><hr>", unsafe_allow_html=True)
-st.caption("Demo: FAQ-first, optional Gemini fallback, session memory via st.session_state.")
+st.caption("Tip: Keep your FAQ in faqs.txt. Add campus-specific details for better coverage.")
